@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Ericsson AB. All rights reserved.
+ * Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
  * Copyright (c) 2014, Centricular Ltd
  *     Author: Sebastian Dröge <sebastian@centricular.com>
  *     Author: Arun Raghavan <arun@centricular.com>
@@ -43,6 +43,9 @@
 
 #include <gst/gstinfo.h>
 
+GST_DEBUG_CATEGORY_EXTERN(_owrdevicelist_debug);
+#define GST_CAT_DEFAULT _owrdevicelist_debug
+
 #ifdef __APPLE__
 #include "owr_device_list_avf_private.h"
 #include <TargetConditionals.h>
@@ -55,8 +58,9 @@
 
 #elif defined(__linux__)
 #include <fcntl.h>
-#include <libv4l2.h>
 #include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 #endif /* defined(__linux__) */
 
@@ -72,6 +76,7 @@ typedef struct {
 static gboolean cb_call_closure_with_list_later(CallbackAndList *cal)
 {
     _owr_utils_call_closure_with_list(cal->callback, cal->list);
+    g_list_free_full(cal->list, g_object_unref);
 
     g_slice_free(CallbackAndList, cal);
 
@@ -99,7 +104,9 @@ void _owr_get_capture_devices(OwrMediaType types, GClosure *callback)
     if (G_CLOSURE_NEEDS_MARSHAL(callback))
         g_closure_set_marshal(callback, g_cclosure_marshal_generic);
 
-    merger = _owr_utils_list_closure_merger_new(callback, (GDestroyNotify) g_object_unref);
+    merger = _owr_utils_list_closure_merger_new(callback,
+        (GCopyFunc) g_object_ref,
+        (GDestroyNotify) g_object_unref);
 
     if (types & OWR_MEDIA_TYPE_VIDEO) {
         g_closure_ref(merger);
@@ -120,13 +127,17 @@ void _owr_get_capture_devices(OwrMediaType types, GClosure *callback)
 
 static gboolean enumerate_video_source_devices(GClosure *callback)
 {
-    _owr_utils_call_closure_with_list(callback, _owr_get_avf_video_sources());
+    GList *sources = _owr_get_avf_video_sources();
+    _owr_utils_call_closure_with_list(callback, sources);
+    g_list_free_full(sources, g_object_unref);
     return FALSE;
 }
 
 static gboolean enumerate_audio_source_devices(GClosure *callback)
 {
-    _owr_utils_call_closure_with_list(callback, _owr_get_core_audio_sources());
+    GList *sources = _owr_get_core_audio_sources();
+    _owr_utils_call_closure_with_list(callback, sources);
+    g_list_free_full(sources, g_object_unref);
     return FALSE;
 }
 
@@ -269,10 +280,13 @@ static void source_info_iterator(pa_context *pa_context, const pa_source_info *i
 static gboolean enumerate_audio_source_devices(GClosure *callback)
 {
     OwrLocalMediaSource *source;
+    GList *sources = NULL;
 
     source = _owr_local_media_source_new_cached(-1,
         "Default audio input", OWR_MEDIA_TYPE_AUDIO, OWR_SOURCE_TYPE_CAPTURE);
-    _owr_utils_call_closure_with_list(callback, g_list_prepend(NULL, source));
+    sources = g_list_prepend(sources, source);
+    _owr_utils_call_closure_with_list(callback, sources);
+    g_list_free_full(sources, g_object_unref);
 
     return FALSE;
 }
@@ -299,7 +313,7 @@ static gchar *get_v4l2_device_name(gchar *filename)
         return NULL;
     }
 
-    if (v4l2_ioctl(fd, VIDIOC_QUERYCAP, &vcap) < 0) {
+    if (ioctl(fd, VIDIOC_QUERYCAP, &vcap) < 0) {
         g_warning("v4l: failed to query %s", filename);
 
         device_name = g_strdup(filename);
@@ -377,6 +391,7 @@ static gboolean enumerate_video_source_devices(GClosure *callback)
 
     sources = g_list_reverse(sources);
     _owr_utils_call_closure_with_list(callback, sources);
+    g_list_free_full(sources, g_object_unref);
 
     return FALSE;
 }
@@ -462,7 +477,7 @@ static JNIEnv* get_jni_env_from_jvm(JavaVM *jvm)
         if (pthread_key_create(&detach_key, (void (*)(void *)) on_java_detach))
             g_warning("android device list: failed to set on_java_detach");
 
-        pthread_setspecific(detach_key, env);
+        pthread_setspecific(detach_key, jvm);
     } else if (JNI_OK != err)
         g_warning("jvm->GetEnv() failed");
 
@@ -492,7 +507,7 @@ static JavaVM *get_java_vm(void)
     gpointer handle = NULL;
     static JavaVM *jvm = NULL;
     const gchar *error_string;
-    jsize num_jvms = NULL;
+    jsize num_jvms = 0;
     gint lib_index = 0;
     gint err;
 
@@ -630,7 +645,7 @@ static jint get_camera_facing(gint camera_index)
     JNIEnv *env;
 
     env = get_jni_env();
-    g_return_val_if_fail(env, NULL);
+    g_return_val_if_fail(env, 0);
 
     camera_info_instance = (*env)->NewObject(env, CameraInfo.class, CameraInfo.constructor);
     if ((*env)->ExceptionCheck(env)) {
@@ -677,6 +692,7 @@ static gboolean enumerate_video_source_devices(GClosure *callback)
     }
 
     _owr_utils_call_closure_with_list(callback, sources);
+    g_list_free_full(sources, g_object_unref);
 
     return FALSE;
 }

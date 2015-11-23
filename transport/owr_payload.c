@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Ericsson AB. All rights reserved.
+ * Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
  * Copyright (c) 2014, Centricular Ltd
  *     Author: Sebastian Dröge <sebastian@centricular.com>
  *     Author: Arun Raghavan <arun@centricular.com>
@@ -38,10 +38,17 @@
 #include "owr_audio_payload.h"
 #include "owr_payload_private.h"
 #include "owr_types.h"
-#include "owr_video_payload.h"
 #include "owr_utils.h"
+#include "owr_video_payload.h"
 
 #include <string.h>
+
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
+GST_DEBUG_CATEGORY_EXTERN(_owrpayload_debug);
+#define GST_CAT_DEFAULT _owrpayload_debug
 
 #define DEFAULT_MTU 1200
 #define DEFAULT_BITRATE 0
@@ -65,6 +72,7 @@ struct _OwrPayloadPrivate {
     guint bitrate;
     gint rtx_payload_type;      /* -1 => no retransmission, else payload type for rtx pt map */
     guint rtx_time;             /* milliseconds */
+    OwrAdaptationType adaptation;
 };
 
 
@@ -78,6 +86,7 @@ enum {
     PROP_BITRATE,
     PROP_RTX_PAYLOAD_TYPE,
     PROP_RTX_TIME,
+    PROP_ADAPTATION,
     N_PROPERTIES
 };
 
@@ -121,6 +130,9 @@ static void owr_payload_set_property(GObject *object, guint property_id, const G
     case PROP_RTX_TIME:
         priv->rtx_time = g_value_get_uint(value);
         break;
+    case PROP_ADAPTATION:
+        priv->adaptation = g_value_get_enum(value);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
         break;
@@ -162,6 +174,9 @@ static void owr_payload_get_property(GObject *object, guint property_id, GValue 
     case PROP_RTX_TIME:
         g_value_set_uint(value, priv->rtx_time);
         break;
+    case PROP_ADAPTATION:
+        g_value_set_enum(value, priv->adaptation);
+        break;
     default:
         G_OBJECT_WARN_INVALID_PROPERTY_ID(object, property_id, pspec);
         break;
@@ -183,21 +198,21 @@ static gpointer owr_payload_detect_codecs(gpointer data)
     OWR_UNUSED(data);
 
     decoder_factories = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_DECODER |
-                                                              GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-                                                              GST_RANK_MARGINAL);
-    encoder_factories = gst_element_factory_list_get_elements (GST_ELEMENT_FACTORY_TYPE_ENCODER |
-                                                               GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
-                                                               GST_RANK_MARGINAL);
+        GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
+        GST_RANK_MARGINAL);
+    encoder_factories = gst_element_factory_list_get_elements(GST_ELEMENT_FACTORY_TYPE_ENCODER |
+        GST_ELEMENT_FACTORY_TYPE_MEDIA_VIDEO,
+        GST_RANK_MARGINAL);
 
     caps = gst_caps_new_empty_simple("video/x-h264");
     h264_decoders = gst_element_factory_list_filter(decoder_factories, caps, GST_PAD_SINK, FALSE);
     h264_encoders = gst_element_factory_list_filter(encoder_factories, caps, GST_PAD_SRC, FALSE);
-    gst_caps_unref (caps);
+    gst_caps_unref(caps);
 
     caps = gst_caps_new_empty_simple("video/x-vp8");
     vp8_decoders = gst_element_factory_list_filter(decoder_factories, caps, GST_PAD_SINK, FALSE);
     vp8_encoders = gst_element_factory_list_filter(encoder_factories, caps, GST_PAD_SRC, FALSE);
-    gst_caps_unref (caps);
+    gst_caps_unref(caps);
 
     gst_plugin_feature_list_free(decoder_factories);
     gst_plugin_feature_list_free(encoder_factories);
@@ -259,6 +274,11 @@ static void owr_payload_class_init(OwrPayloadClass *klass)
         0, G_MAXUINT, DEFAULT_MTU,
         G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 
+    obj_properties[PROP_ADAPTATION] = g_param_spec_enum("adaptation", "Adaptation",
+        "Type of adaptation to use",
+        OWR_TYPE_ADAPTATION_TYPE, OWR_ADAPTATION_TYPE_DISABLED,
+        G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
+
     g_object_class_install_properties(gobject_class, N_PROPERTIES, obj_properties);
 }
 
@@ -266,7 +286,7 @@ static void owr_payload_init(OwrPayload *payload)
 {
     static GOnce g_once = G_ONCE_INIT;
 
-    g_once (&g_once, owr_payload_detect_codecs, NULL);
+    g_once(&g_once, owr_payload_detect_codecs, NULL);
 
     payload->priv = OWR_PAYLOAD_GET_PRIVATE(payload);
     payload->priv->mtu = DEFAULT_MTU;
@@ -317,8 +337,8 @@ static GstElement * try_codecs(GList *codecs, const gchar *name_prefix)
         GstElement *e;
 
         element_name = g_strdup_printf("%s_%s_%u", name_prefix,
-                                       gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f)),
-                                       get_unique_id());
+            gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(f)),
+                get_unique_id());
 
         e = gst_element_factory_create(f, element_name);
         g_free(element_name);
@@ -329,8 +349,8 @@ static GstElement * try_codecs(GList *codecs, const gchar *name_prefix)
         /* Try setting to READY. If this fails the codec does not work, for
          * example because the hardware codec is currently busy
          */
-        if (gst_element_set_state (e, GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS) {
-            gst_element_set_state (e, GST_STATE_NULL);
+        if (gst_element_set_state(e, GST_STATE_READY) != GST_STATE_CHANGE_SUCCESS) {
+            gst_element_set_state(e, GST_STATE_NULL);
             gst_object_unref(e);
             continue;
         }
@@ -360,6 +380,7 @@ GstElement * _owr_payload_create_encoder(OwrPayload *payload)
     gchar *element_name = NULL;
     GstElementFactory *factory;
     const gchar *factory_name;
+    gint cpu_used;
 
     g_return_val_if_fail(payload, NULL);
 
@@ -374,16 +395,26 @@ GstElement * _owr_payload_create_encoder(OwrPayload *payload)
         if (!strcmp(factory_name, "openh264enc")) {
             g_object_set(encoder, "gop-size", 0, NULL);
             gst_util_set_object_arg(G_OBJECT(encoder), "rate-control", "bitrate");
+            gst_util_set_object_arg(G_OBJECT(encoder), "complexity", "low");
             g_object_bind_property(payload, "bitrate", encoder, "bitrate", G_BINDING_SYNC_CREATE);
         } else if (!strcmp(factory_name, "x264enc")) {
             g_object_bind_property_full(payload, "bitrate", encoder, "bitrate", G_BINDING_SYNC_CREATE,
                 binding_transform_to_kbps, NULL, NULL, NULL);
-            g_object_set(encoder, "tune", 0x04 /* zero-latency */, NULL);
+            gst_util_set_object_arg(G_OBJECT(encoder), "speed-preset", "ultrafast");
+            gst_util_set_object_arg(G_OBJECT(encoder), "tune", "fastdecode+zerolatency");
         } else if (!strcmp(factory_name, "vtenc_h264")) {
             g_object_bind_property_full(payload, "bitrate", encoder, "bitrate", G_BINDING_SYNC_CREATE,
                 binding_transform_to_kbps, NULL, NULL, NULL);
-            g_object_set(encoder, "allow-frame-reordering", FALSE, "realtime", TRUE,
-                "quality", 0.5, "max-keyframe-interval", G_MAXINT, NULL);
+            g_object_set(encoder,
+                "allow-frame-reordering", FALSE,
+                "realtime", TRUE,
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+                "quality", 0.0,
+#else
+                "quality", 0.5,
+#endif
+                "max-keyframe-interval", G_MAXINT,
+                NULL);
         } else {
             /* Assume bits/s instead of kbit/s */
             g_object_bind_property(payload, "bitrate", encoder, "bitrate", G_BINDING_SYNC_CREATE);
@@ -394,8 +425,28 @@ GstElement * _owr_payload_create_encoder(OwrPayload *payload)
     case OWR_CODEC_TYPE_VP8:
         encoder = try_codecs(vp8_encoders, "encoder");
         g_return_val_if_fail(encoder, NULL);
-        g_object_set(encoder, "end-usage", 1, "deadline", G_GINT64_CONSTANT(1), "lag-in-frames", 0,
-            "error-resilient", 1, "keyframe-mode", 0, NULL);
+
+#if (defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_IPHONE_SIMULATOR) || defined(__ANDROID__)
+        cpu_used = -12; /* Mobile */
+#else
+        cpu_used = -6; /* Desktop */
+#endif
+        /* values are inspired by webrtc.org values in vp8_impl.cc */
+        g_object_set(encoder,
+            "end-usage", 1, /* VPX_CBR */
+            "deadline", G_GINT64_CONSTANT(1), /* VPX_DL_REALTIME */
+            "cpu-used", cpu_used,
+            "min-quantizer", 2,
+            "buffer-initial-size", 300,
+            "buffer-optimal-size", 300,
+            "buffer-size", 400,
+            "dropframe-threshold", 30,
+            "lag-in-frames", 0,
+            "timebase", 1, 90000,
+            "error-resilient", 1,
+            "keyframe-mode", 0, /* VPX_KF_DISABLED */
+            NULL);
+
         g_object_bind_property(payload, "bitrate", encoder, "target-bitrate", G_BINDING_SYNC_CREATE);
         g_object_set(payload, "bitrate", evaluate_bitrate_from_payload(payload), NULL);
         break;

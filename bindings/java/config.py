@@ -1,6 +1,6 @@
 #!/usr/bin/env python -B
 
-# Copyright (c) 2014, Ericsson AB. All rights reserved.
+# Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification,
 # are permitted provided that the following conditions are met:
@@ -28,11 +28,10 @@ PACKAGE_ROOT = 'com.ericsson.research'
 LOG_TAG = 'OpenWebRTC'
 
 IGNORED_ELEMENTS = [
-    ".//*[@name='on-new-stats']",
-    ".//*[@name='init_with_main_context']",
+    # ".//*[@name='name_of_symbol_to_ignore_here']",
 ]
 
 C_INDENTATION = ' ' * 4
 JAVA_INDENTATION = ' ' * 4
 
-
+LOCAL_FRAME_SIZE = 16

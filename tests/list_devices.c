@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2014, Ericsson AB. All rights reserved.
+ * Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
  * Copyright (c) 2014, Centricular Ltd
  *     Author: Sebastian Dröge <sebastian@centricular.com>
  *
@@ -32,9 +32,16 @@
 #include "owr.h"
 #include "owr_local.h"
 #include "owr_media_source.h"
+#include "owr_crypto_utils.h"
 
-static GMainLoop *loop;
+static void got_crypto_data(gchar *privatekey, gchar *certificate, gchar *fingerprint)
+{
+    g_print("got got_crypto_data \n");
+    g_print("privatekey %s \n", privatekey);
+    g_print("certificate %s \n", certificate);
+    g_print("fingerprint %s \n", fingerprint);
 
+}
 static void got_sources(GList *sources, gpointer user_data)
 {
     OwrMediaSource *source = NULL;
@@ -56,19 +63,15 @@ static void got_sources(GList *sources, gpointer user_data)
         sources = sources->next;
     }
 
-    g_main_loop_quit(loop);
+    owr_quit();
 }
 
 int main() {
-    GMainContext *ctx = g_main_context_default();
-
-    loop = g_main_loop_new(ctx, FALSE);
-
-    owr_init_with_main_context(ctx);
+    owr_init(NULL);
 
     owr_get_capture_sources(OWR_MEDIA_TYPE_AUDIO|OWR_MEDIA_TYPE_VIDEO, got_sources, NULL);
-
-    g_main_loop_run(loop);
+    owr_crypto_create_crypto_data(got_crypto_data);
+    owr_run();
 
     return 0;
 }

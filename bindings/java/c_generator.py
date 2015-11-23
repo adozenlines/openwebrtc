@@ -1,4 +1,4 @@
-# Copyright (c) 2014, Ericsson AB. All rights reserved.
+# Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification,
 # are permitted provided that the following conditions are met:
@@ -71,9 +71,10 @@ class Log(C.Lines):
     warning = _make_logfunc('warning')
     debug = _make_logfunc('debug')
     info = _make_logfunc('info')
+    verbose = _make_logfunc('verbose')
 
     def __iter__(self):
-        yield 'log_%s("%s"%s);' % (self.level, self.msg, (', ' if self.args else '') + flatjoin(self.args, ', '))
+        yield C.Call('log_' + self.level, quot(self.msg), *self.args)
 
 
 @add_to(C)
@@ -102,6 +103,7 @@ class ExceptionCheck(C.Lines):
     def __iter__(self):
         yield C.If(C.Env('ExceptionCheck'),
             C.Log('warning', 'exception at %s:%d', '__FILE__', '__LINE__'),
+            C.Env('ExceptionDescribe'),
             C.Return(self.value),
         )
 
@@ -143,7 +145,7 @@ class Function(C.FunctionBlock):
             'return_type': callback.params.return_value.c_type,
             'name': 'callback_' + callback.value.gir_type,
             'params': map(c_param, callback.params),
-            'body': [TypeConversions.params_to_jni(callback.params, body=body or [], get_env=True)],
+            'body': [TypeConversions.params_to_jni(callback.params, body=body or [], push_frame=True)],
         }
         if callback.params.return_value.name is not None:
             args['body'] += [C.Return(callback.params.return_value.c_name)]
@@ -199,7 +201,7 @@ class JniExport(C.FunctionBlock):
             'return_type': function.params.return_value.jni_type,
             'method_name': function.name,
             'params': params,
-            'body': [C.TypeConversions.params_to_c(function.params, body=body)],
+            'body': [C.TypeConversions.params_to_c(function.params, body=body, get_env=False)],
         }
         if function.params.return_value.name is not None:
             args['body'] += [C.Return(function.params.return_value.jni_name)]
@@ -384,19 +386,25 @@ class Env(C.Lines):
 
 @add_to(C)
 class TypeConversions(C.Lines):
-    def __init__(self, conversions, return_conversion, body=None, get_env=False, **kwargs):
+    def __init__(self, conversions, return_conversion, body=None, get_env=True, push_frame=False, **kwargs):
         super(TypeConversions, self).__init__(**kwargs)
         self.conversions = list(conversions)
         self.return_conversion = return_conversion
         self.body = body or []
         self.get_env = get_env
+        self.push_frame = push_frame
 
     def __iter__(self):
         conversion = [
             prune_empty([p.declarations for p in self.conversions] + [self.get_env and C.Decl('JNIEnv*', 'env')]),
-            prune_empty([self.get_env and C.Assign('env', C.Call('get_jni_env'))] + [p.conversion for p in self.conversions]),
+            self.get_env and C.Assign('env', C.Call('get_jni_env')),
+            C.If(Env('PushLocalFrame', str(config.LOCAL_FRAME_SIZE)),
+                C.Log('warning', 'failed to push local frame at %s:%d', '__FILE__', '__LINE__')
+            ) if self.push_frame else [],
+            prune_empty([p.conversion for p in self.conversions]),
             self.body,
             prune_empty(p.cleanup for p in reversed(self.conversions)),
+            Env('PopLocalFrame', 'NULL') if self.push_frame else [],
         ]
         if self.return_conversion is not None:
             conversion = [self.return_conversion.declarations] + conversion + [
@@ -471,6 +479,9 @@ def gen_class(package, clazz):
         body += [C.Comment(attr) if getattr(clazz, attr) else None]
         body += map(make_function_gen(package, clazz.name), getattr(clazz, attr))
 
+    for interface in clazz.interfaces:
+        body += map(make_function_gen(package, clazz.name), interface.methods)
+
     body += [C.Comment('signals') if clazz.signals else None]
     body += map(make_callback_gen(package, clazz.name), clazz.signals)
     body += map(gen_signal_accessors, clazz.signals)
@@ -498,9 +509,8 @@ def gen_class(package, clazz):
                 name='callback_' + prop.signal.value.gir_type,
                 return_type=prop.signal.params.return_value.c_type,
                 params=map(c_param, prop.signal.params),
-                body=[TypeConversions([p.transform_to_jni() for p in prop.signal.params.params], None, body=[
+                body=[TypeConversions([p.transform_to_jni() for p in prop.signal.params.params], None, push_frame=True, body=[
                     '(void) c_pspec;',
-                    C.Assign('env', C.Call('get_jni_env')),
                     C.Call('g_object_get', get_params),
                     transform.conversion,
                     C.Env.callback(prop.signal),
@@ -508,7 +518,6 @@ def gen_class(package, clazz):
                 ])],
             )
             func.body = [
-                C.Decl('JNIEnv*', 'env'),
                 C.Decl(ret.c_type, ret.c_name),
                 transform.declarations,
             ] + func.body
@@ -583,6 +592,15 @@ def gen_source(namespaces, include_headers):
         _end = '} JObjectWrapper;',
     )
 
+    jobject_callback_wrapper_struct = C.Block(
+        _start = 'typedef struct {',
+        body = [
+            C.Decl('JObjectWrapper', '*wrapper'),
+            C.Decl('gboolean', 'should_destroy'),
+        ],
+        _end = '} JObjectCallbackWrapper;',
+    )
+
     native_destructor = [C.JniExport(
         package=package,
         clazz='NativeInstance',
@@ -615,6 +633,10 @@ def gen_source(namespaces, include_headers):
 
     helper_functions = Helper.enumerate_used_helpers()
 
+    gobject_class_cache = [
+        C.Call('g_hash_table_insert', 'gobject_to_java_class_map', C.Call(clazz.glib_get_type), Cache.default_class(clazz.value))
+    for clazz in namespace.classes for namespace in namespaces];
+
     # cached classes need to be enumerated last
     cache_declarations, jni_onload_cache = C.Cache.enumerate_cached_classes()
 
@@ -631,6 +653,10 @@ def gen_source(namespaces, include_headers):
             '',
             jni_onload_cache,
             '',
+            C.Assign('gobject_to_java_class_map', C.Call('g_hash_table_new', 'g_direct_hash', 'g_direct_equal')),
+            '',
+            gobject_class_cache,
+            '',
             C.Return('JNI_VERSION_1_6'),
         ]
     )
@@ -642,9 +668,11 @@ def gen_source(namespaces, include_headers):
         includes,
         HEADER,
         cache_declarations,
+        C.Decl('static GHashTable*', 'gobject_to_java_class_map'),
         GET_JNI_ENV,
         jni_onload,
         jobject_wrapper_struct,
+        jobject_callback_wrapper_struct,
     ] + helper_functions + [native_destructor] + body
 
     body = intersperse(prune_empty(body), '')
@@ -667,6 +695,20 @@ HEADER = """
 
 GET_JNI_ENV = [
     C.Decl('static JavaVM*', 'jvm'),
+    C.Decl('static pthread_key_t', 'pthread_detach_key = 0'),
+    '',
+    C.Function('detach_current_thread',
+        params=['void* pthread_key'],
+        body=[
+            C.Decl('(void)', 'pthread_key'),
+            C.Call('g_return_if_fail', 'jvm'),
+            '',
+            C.Log.debug('JNI: detaching current thread from Java VM: %ld', C.Call('pthread_self')),
+            '',
+            C.Call('(*jvm)->DetachCurrentThread', 'jvm'),
+            C.Call('pthread_setspecific', 'pthread_detach_key', 'NULL'),
+        ]
+    ),
     '',
     C.Function('get_jni_env',
         return_type='JNIEnv*',
@@ -682,8 +724,12 @@ GET_JNI_ENV = [
                 bodies=[
                     C.IfElse(ifs=['(*jvm)->AttachCurrentThread(jvm, (JNIEnv**) &env, NULL) != 0'],
                         bodies=[
-                            C.Log.error('JNI: failed to attach thread'),
-                            C.Log.info('JNI: successfully attached to thread'),
+                            C.Log.error('JNI: failed to attach thread'), [
+                                C.Log.info('JNI: successfully attached to thread'),
+                                C.If(C.Call('pthread_key_create', '&pthread_detach_key', 'detach_current_thread'),
+                                    C.Log.error('JNI: failed to set detach callback')),
+                                C.Call('pthread_setspecific', 'pthread_detach_key', 'jvm'),
+                            ]
                         ]),
                     C.Log.error('JNI: version not supported'),
                 ]

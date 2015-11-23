@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Ericsson AB. All rights reserved.
+ * Copyright (C) 2014-2015 Ericsson AB. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -109,8 +109,8 @@ server.onaccept = function (event) {
         ws = null;
     };
 
-    rpcScope.createPeerHandler = function (configuration, client) {
-        var peerHandler = new PeerHandler(configuration, client, jsonRpc);
+    rpcScope.createPeerHandler = function (configuration, keyCert, client) {
+        var peerHandler = new PeerHandler(configuration, keyCert, client, jsonRpc);
         peerHandlers.push(peerHandler);
         var exports = [ "prepareToReceive", "prepareToSend", "addRemoteCandidate",
             "createDataChannel" ];
@@ -118,6 +118,25 @@ server.onaccept = function (event) {
             jsonRpc.exportFunctions(peerHandler[exports[i]]);
         return jsonRpc.createObjectRef(peerHandler, exports);
     };
+
+    rpcScope.createKeys = function (client) {
+        var localcertificate, localprivatekey, localfingerprint;
+        owr.crypto_create_crypto_data(function (privatekey, certificate, fingerprint) {
+            if ((privatekey && certificate && fingerprint)) {
+                if (fingerprint == "Failure") {
+                    console.log("generation of crypto data has failed");
+                    client.dtlsInfoGenerationDone();
+                }
+                else {
+                    client.dtlsInfoGenerationDone({
+                        "certificate": certificate,
+                        "privatekey": privatekey,
+                        "fingerprint": fingerprint
+                    });
+                }
+            }
+        });
+    }
 
     rpcScope.requestSources = function (options, client) {
         var mediaTypes = 0;
@@ -143,7 +162,8 @@ server.onaccept = function (event) {
                         sourceInfos.push({
                             "mediaType": mediaType,
                             "label": sources[i].name,
-                            "source": jsonRpc.createObjectRef(sources[i])
+                            "source": jsonRpc.createObjectRef(sources[i]),
+                            "type": ["unknown", "capture", "test"][sources[i].type]
                         });
                         break;
                     }
@@ -171,7 +191,7 @@ server.onaccept = function (event) {
         });
     };
 
-    rpcScope.renderSources = function (audioSources, videoSources, tag) {
+    rpcScope.renderSources = function (audioSources, videoSources, tag, useVideoOverlay) {
         var audioRenderer;
         if (audioSources.length > 0) {
             audioRenderer = new owr.AudioRenderer({ "disabled": true });
@@ -181,21 +201,24 @@ server.onaccept = function (event) {
         var imageServerPort = 0;
         var videoRenderer;
         if (videoSources.length > 0) {
-            videoRenderer = new owr.ImageRenderer();
+            videoRenderer = useVideoOverlay ? new owr.VideoRenderer({ "tag": tag })
+                : new owr.ImageRenderer();
             videoRenderer.set_source(videoSources[0]);
 
-            if (nextImageServerPort > imageServerBasePort + 10)
-                nextImageServerPort = imageServerBasePort;
-            imageServerPort = nextImageServerPort++;
-            imageServer = imageServers[imageServerPort];
-            if (!imageServer) {
-                imageServer = imageServers[imageServerPort] = new owr.ImageServer({
-                    "port": imageServerPort,
-                    "allow-origin": origin
-                });
-            } else if (imageServer.allow_origin.split(" ").indexOf(origin) == -1)
-                imageServer.allow_origin += " " + origin;
-            imageServer.add_image_renderer(videoRenderer, tag);
+            if (!useVideoOverlay) {
+                if (nextImageServerPort > imageServerBasePort + 10)
+                    nextImageServerPort = imageServerBasePort;
+                imageServerPort = nextImageServerPort++;
+                imageServer = imageServers[imageServerPort];
+                if (!imageServer) {
+                    imageServer = imageServers[imageServerPort] = new owr.ImageServer({
+                        "port": imageServerPort,
+                        "allow-origin": origin
+                    });
+                } else if (imageServer.allow_origin.split(" ").indexOf(origin) == -1)
+                    imageServer.allow_origin += " " + origin;
+                imageServer.add_image_renderer(videoRenderer, tag);
+            }
         }
 
         var controller = new RenderController(audioRenderer, videoRenderer, imageServerPort, tag);
@@ -206,7 +229,7 @@ server.onaccept = function (event) {
         return { "controller": controllerRef, "port": imageServerPort };
     };
 
-    jsonRpc.exportFunctions(rpcScope.createPeerHandler, rpcScope.requestSources, rpcScope.renderSources);
+    jsonRpc.exportFunctions(rpcScope.createPeerHandler, rpcScope.requestSources, rpcScope.renderSources, rpcScope.createKeys);
 
 };
 

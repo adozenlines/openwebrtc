@@ -1,4 +1,4 @@
-# Copyright (c) 2014, Ericsson AB. All rights reserved.
+# Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification,
 # are permitted provided that the following conditions are met:
@@ -68,6 +68,38 @@ type_signatures = {
         '_path': PATH_BASE + 'ValueEnum',
         '_constructor': '()V',
         'getValue': '()I',
+    },
+    'Boolean': {
+        '_path': 'java/lang/Boolean',
+        'valueOf': '(Z)Ljava/lang/Boolean;',
+    },
+    'Byte': {
+        '_path': 'java/lang/Byte',
+        'valueOf': '(B)Ljava/lang/Byte;',
+    },
+    'Character': {
+        '_path': 'java/lang/Character',
+        'valueOf': '(C)Ljava/lang/Character;',
+    },
+    'Short': {
+        '_path': 'java/lang/Short',
+        'valueOf': '(S)Ljava/lang/Short;',
+    },
+    'Integer': {
+        '_path': 'java/lang/Integer',
+        'valueOf': '(I)Ljava/lang/Integer;',
+    },
+    'Long': {
+        '_path': 'java/lang/Long',
+        'valueOf': '(J)Ljava/lang/Long;',
+    },
+    'Float': {
+        '_path': 'java/lang/Float',
+        'valueOf': '(F)Ljava/lang/Float;',
+    },
+    'Double': {
+        '_path': 'java/lang/Double',
+        'valueOf': '(D)Ljava/lang/Double;',
     },
 }
 

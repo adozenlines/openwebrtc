@@ -35,6 +35,9 @@
 
 #include <string.h>
 
+GST_DEBUG_CATEGORY_EXTERN(_owrdatachannel_debug);
+#define GST_CAT_DEFAULT _owrdatachannel_debug
+
 #define DEFAULT_ORDERED TRUE
 #define DEFAULT_MAX_PACKETS_LIFE_TIME -1
 #define DEFAULT_MAX_RETRANSMITS -1
@@ -51,8 +54,7 @@
 
 G_DEFINE_TYPE(OwrDataChannel, owr_data_channel, G_TYPE_OBJECT)
 
-#define OWR_DATA_CHANNEL_READY_STATE_TYPE (owr_data_channel_ready_state_get_type())
-static GType owr_data_channel_ready_state_get_type(void)
+GType owr_data_channel_ready_state_get_type(void)
 {
     static const GEnumValue values[] = {
         {OWR_DATA_CHANNEL_READY_STATE_CONNECTING, "Ready State connecting", "ready-state-connecting"},
@@ -65,7 +67,7 @@ static GType owr_data_channel_ready_state_get_type(void)
 
     if (g_once_init_enter((gsize *) & id)) {
         GType _id;
-        _id = g_enum_register_static("GstSctpReadyState", values);
+        _id = g_enum_register_static("OwrDataChannelReadyStates", values);
         g_once_init_leave((gsize *) & id, _id);
     }
 
@@ -83,7 +85,7 @@ struct _OwrDataChannelPrivate {
     GClosure *on_datachannel_send;
     GClosure *on_request_bytes_sent;
     GClosure *on_datachannel_close;
-    DataChannelReadyState ready_state;
+    OwrDataChannelReadyState ready_state;
     guint64 bytes_sent;
 };
 
@@ -429,9 +431,8 @@ static gboolean data_channel_send(GHashTable *args)
         g_value_unset(&params[1]);
         g_value_unset(&params[2]);
         g_value_unset(&params[3]);
-    } else {
+    } else
         g_free(data);
-    }
 
     g_hash_table_unref(args);
     g_object_unref(data_channel);
@@ -450,12 +451,14 @@ static gboolean data_channel_close(GHashTable *args)
     data_channel = g_hash_table_lookup(args, "data_channel");
     priv = data_channel->priv;
 
-    g_return_val_if_fail(priv->on_datachannel_close, FALSE);
+    g_warn_if_fail(priv->on_datachannel_close);
 
-    g_value_init(&params[0], OWR_TYPE_DATA_CHANNEL);
-    g_value_set_object(&params[0], data_channel);
-    g_closure_invoke(priv->on_datachannel_close, NULL, 1, (const GValue *)&params, NULL);
-    g_value_unset(&params[0]);
+    if (priv->on_datachannel_close) {
+        g_value_init(&params[0], OWR_TYPE_DATA_CHANNEL);
+        g_value_set_object(&params[0], data_channel);
+        g_closure_invoke(priv->on_datachannel_close, NULL, 1, (const GValue *)&params, NULL);
+        g_value_unset(&params[0]);
+    }
 
     g_hash_table_unref(args);
     g_object_unref(data_channel);
@@ -481,9 +484,8 @@ static guint get_buffered_amount(OwrDataChannel *data_channel)
 
         g_value_unset(&params[0]);
         g_value_unset(&ret_value);
-    } else {
+    } else
         g_warning("on_request_bytes_sent closure not set. Cannot get buffered amount.");
-    }
 
     if (priv->bytes_sent < bytes_sent)
         bytes_sent = 0;
@@ -500,7 +502,7 @@ static gboolean set_ready_state(GHashTable *args)
 {
     OwrDataChannel *data_channel;
     OwrDataChannelPrivate *priv;
-    DataChannelReadyState state;
+    OwrDataChannelReadyState state;
 
     data_channel = g_hash_table_lookup(args, "data_channel");
     state = GPOINTER_TO_UINT(g_hash_table_lookup(args, "state"));
@@ -604,7 +606,7 @@ void _owr_data_channel_clear_closures(OwrDataChannel *data_channel)
     }
 }
 
-void _owr_data_channel_set_ready_state(OwrDataChannel *data_channel, DataChannelReadyState state)
+void _owr_data_channel_set_ready_state(OwrDataChannel *data_channel, OwrDataChannelReadyState state)
 {
     GHashTable *args;
 
@@ -630,7 +632,7 @@ GstCaps * _owr_data_channel_create_caps(OwrDataChannel *data_channel)
 
     caps = gst_caps_new_simple("application/data", "ordered", G_TYPE_BOOLEAN, priv->ordered,
         "ppid", G_TYPE_UINT, ppid, NULL);
-    if (priv->max_packet_life_time == -1 && !priv->max_retransmits == -1) {
+    if (priv->max_packet_life_time == -1 && priv->max_retransmits == -1) {
         gst_caps_set_simple(caps, "partially-reliability", G_TYPE_STRING, "none",
             "reliability-parameter", G_TYPE_UINT, 0, NULL);
     } else if (priv->max_retransmits >= 0) {

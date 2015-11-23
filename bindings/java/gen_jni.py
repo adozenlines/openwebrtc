@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2014, Ericsson AB. All rights reserved.
+# Copyright (c) 2014-2015, Ericsson AB. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without modification,
 # are permitted provided that the following conditions are met:
@@ -37,6 +37,7 @@ from c_generator import C
 from gir_parser import GirParser
 from type_registry import TypeRegistry
 from type_registry import TypeTransform
+from type_registry import GirMetaType
 from standard_types import standard_types
 from standard_types import ObjectMetaType
 
@@ -94,7 +95,10 @@ HEADERS = [
     'owr.h',
     'owr_audio_payload.h',
     'owr_audio_renderer.h',
+    'owr_bus.h',
     'owr_candidate.h',
+    'owr_data_channel.h',
+    'owr_data_session.h',
     'owr_image_renderer.h',
     'owr_image_server.h',
     'owr_local.h',
@@ -102,6 +106,7 @@ HEADERS = [
     'owr_media_renderer.h',
     'owr_media_session.h',
     'owr_media_source.h',
+    'owr_message_origin.h',
     'owr_payload.h',
     'owr_remote_media_source.h',
     'owr_session.h',
@@ -110,6 +115,7 @@ HEADERS = [
     'owr_video_payload.h',
     'owr_video_renderer.h',
     'owr_window_registry.h',
+    'owr_crypto_utils.h',
 ]
 
 class WindowHandleType(ObjectMetaType(
@@ -125,6 +131,17 @@ class WindowHandleType(ObjectMetaType(
         ],[
             C.Assign(self.c_name, C.Call('ANativeWindow_fromSurface', 'env', self.jni_name)),
         ])
+
+
+class GMainContextDummy(GirMetaType()):
+    gir_type = 'GLib.MainContext'
+    c_type = 'GMainContext*'
+
+    def __init__(self, *ignored):
+        self.c_name = 'NULL'
+
+    def transform_to_c(self):
+        return TypeTransform()
 
 
 def remove_ignored_elements(xml_root):
@@ -147,6 +164,7 @@ def main(argv = None):
     type_registry = TypeRegistry()
     type_registry.register(standard_types)
     type_registry.register(WindowHandleType)
+    type_registry.register(GMainContextDummy)
 
     xml_root = ET.parse(args.gir).getroot()
     remove_ignored_elements(xml_root)

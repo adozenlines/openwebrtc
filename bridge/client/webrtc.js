@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 Ericsson AB. All rights reserved.
+ * Copyright (C) 2014-2015 Ericsson AB. All rights reserved.
  * Copyright (C) 2015 Collabora Ltd.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -53,18 +53,17 @@
         ],
         "video": [
             { "encodingName": "H264", "type": 103, "clockRate": 90000,
-                "ccmfir": true, "nackpli": true, /* "nack": true, */
-                "parameters": { "packetizationMode": 1 } },
+                "ccmfir": true, "nackpli": true, "ericscream": true, /* "nack": true, */
+                "parameters": { "levelAsymmetryAllowed": 1, "packetizationMode": 1 } },
 /* FIXME: Enable when Chrome can handle an offer with RTX for H264
             { "encodingName": "RTX", "type": 123, "clockRate": 90000,
                 "parameters": { "apt": 103, "rtxTime": 200 } },*/
             { "encodingName": "VP8", "type": 100, "clockRate": 90000,
-                "ccmfir": true, "nackpli": true, "nack": true },
+                "ccmfir": true, "nackpli": true, "nack": true, "ericscream": true },
             { "encodingName": "RTX", "type": 120, "clockRate": 90000,
                 "parameters": { "apt": 100, "rtxTime": 200 } }
         ]
     };
-
 
     var messageChannel = new function () {
         var _this = this;
@@ -107,16 +106,37 @@
     var renderControllerMap = {};
 
     var bridge = new JsonRpc(messageChannel);
-    bridge.importFunctions("createPeerHandler", "requestSources", "renderSources");
+    bridge.importFunctions("createPeerHandler", "requestSources", "renderSources", "createKeys");
+
+    var dtlsInfo;
+    var deferredCreatePeerHandlers = [];
+
+    (function () {
+        var client = {}; 
+        client.dtlsInfoGenerationDone = function (generatedDtlsInfo) {
+            dtlsInfo = generatedDtlsInfo;
+            if (!dtlsInfo) 
+                console.log("createKeys returned without any dtlsInfo - anything involving use of PeerConnection won't work");
+            else {
+                var func;
+                while ((func = deferredCreatePeerHandlers.shift()))
+                    func();
+            }
+            bridge.removeObjectRef(client);
+        }
+    
+    
+        bridge.createKeys(bridge.createObjectRef(client, "dtlsInfoGenerationDone"));
+    })();
 
     function getUserMedia(options) {
-        checkArguments("getUserMedia", "object", 1, arguments);
+        checkArguments("getUserMedia", "dictionary", 1, arguments);
 
         return internalGetUserMedia(options);
     }
 
     function legacyGetUserMedia(options, successCallback, errorCallback) {
-        checkArguments("getUserMedia", "object, function, function", 3, arguments);
+        checkArguments("getUserMedia", "dictionary, function, function", 3, arguments);
 
         internalGetUserMedia(options).then(successCallback).catch(errorCallback);
     }
@@ -144,12 +164,20 @@
                 resolve(new MediaStream(trackList));
             };
             client.noSources = function (reason) {
-                var message = "AbortError";
-                if (reason == "rejected") 
-                    message = "PermissionDeniedError";
-                else if (reason == "notavailable")
-                    message = "SourceUnavailableError";
-                reject(new MediaStreamError({"name": message}));
+                var name = "AbortError";
+                var message = "Aborted";
+                if (reason == "rejected") {
+                    name = "PermissionDeniedError";
+                    message = "The user did not grant permission for the operation.";
+                }
+                else if (reason == "notavailable") {
+                    name = "SourceUnavailableError";
+                    message = "The sources available did not match the requirements.";
+                }
+                reject(new MediaStreamError({
+                    "name": name,
+                    "message": message
+                }));
             }
             bridge.requestSources(options, bridge.createObjectRef(client, "gotSources", "noSources"));
         });
@@ -176,7 +204,7 @@
         });
 
         var a = { // attributes
-            "id": mediaStreamPrivateInit.id || randomString(),
+            "id": mediaStreamPrivateInit.id || randomString(36),
             "active": false
         };
         domObject.addReadOnlyAttributes(this, a);
@@ -262,7 +290,7 @@
 
         var a = { // attributes
             "kind": sourceInfo.mediaType,
-            "id": id || randomString(),
+            "id": id || randomString(36),
             "label": sourceInfo.label,
             "muted": false,
             "readyState": "live"
@@ -291,14 +319,14 @@
             initDict = {};
 
         var a = { // attributes
-            "name": initDict.name || "",
+            "name": initDict.name || "MediaStreamError",
             "message": initDict.message || null,
             "constraintName": initDict.constraintName || null
         };
         domObject.addReadOnlyAttributes(this, a);
 
         this.toString = function () {
-            return "MediaStreamError: " + a.name + ": " + (a.message ? a.message : "");
+            return a.name + ": " + (a.message ? a.message : "");
         };
     }
 
@@ -307,7 +335,7 @@
     //
     RTCPeerConnection.prototype = Object.create(EventTarget.prototype);
     RTCPeerConnection.prototype.constructor = RTCPeerConnection;
-    RTCPeerConnection.prototype.createDataChannel = function () { 
+    RTCPeerConnection.prototype.createDataChannel = function () {
         console.warn("createDataChannel only exposed on the prototype for feature probing");
     };
 
@@ -333,7 +361,7 @@
         };
         domObject.addReadOnlyAttributes(this, a);
 
-        checkArguments("RTCPeerConnection", "object", 1, arguments);
+        checkArguments("RTCPeerConnection", "dictionary", 1, arguments);
         checkConfigurationDictionary(configuration);
 
         if (!configuration.iceTransports)
@@ -349,13 +377,21 @@
             "dataChannelsEnabled", "dataChannelRequested");
         var deferredPeerHandlerCalls = [];
 
-        bridge.createPeerHandler(configuration, clientRef, function (ph) {
-            peerHandler = ph;
+        function createPeerHandler() {
+            bridge.createPeerHandler(configuration, {"key": dtlsInfo.privatekey, "certificate": dtlsInfo.certificate}, clientRef, function (ph) {
+                peerHandler = ph;
 
-            var func;
-            while ((func = deferredPeerHandlerCalls.shift()))
-                func();
-        });
+                var func;
+                while ((func = deferredPeerHandlerCalls.shift()))
+                    func();
+            });
+        }
+
+        if (dtlsInfo)
+            createPeerHandler()
+        else
+            deferredCreatePeerHandlers.push(createPeerHandler);
+
 
         function whenPeerHandler(func) {
             if (peerHandler)
@@ -374,6 +410,7 @@
                 deferredCreateDataChannelCalls.push(func);
         }
 
+        var cname = randomString(16);
         var negotiationNeededTimerHandle;
         var hasDataChannels = false;
         var localSessionInfo = null;
@@ -439,13 +476,13 @@
 
         this.createOffer = function () {
             // backwards compatibility with callback based method
-            var callbackArgsError = getArgumentsError("function, function, object", 2, arguments);
+            var callbackArgsError = getArgumentsError("function, function, dictionary", 2, arguments);
             if (!callbackArgsError) {
                 internalCreateOffer(arguments[2]).then(arguments[0]).catch(arguments[1]);
                 return;
             }
 
-            var promiseArgsError = getArgumentsError("object", 0, arguments);
+            var promiseArgsError = getArgumentsError("dictionary", 0, arguments);
             if (!promiseArgsError)
                 return internalCreateOffer(arguments[0]);
 
@@ -487,7 +524,11 @@
                     "type": trackInfo.kind,
                     "payloads": JSON.parse(JSON.stringify(defaultPayloads[trackInfo.kind])),
                     "rtcp": { "mux": true },
-                    "dtls": { "setup": "actpass" }
+                    "ssrcs": [ randomNumber(32) ],
+                    "cname": cname,
+                    "ice": { "ufrag": randomString(4), "password": randomString(22) },
+                    "dtls": { "setup": "actpass", "fingerprintHashFunction": "sha-256",
+                        "fingerprint": dtlsInfo.fingerprint.toUpperCase() }
                 });
             });
 
@@ -498,7 +539,8 @@
                         "type": kind,
                         "payloads": JSON.parse(JSON.stringify(defaultPayloads[kind])),
                         "rtcp": { "mux": true },
-                        "dtls": { "setup": "actpass" },
+                        "dtls": { "setup": "actpass", "fingerprintHashFunction": "sha-256",
+                            "fingerprint": dtlsInfo.fingerprint.toUpperCase() },
                         "mode": "recvonly"
                     });
                 }
@@ -510,7 +552,9 @@
                     "type": "application",
                     "protocol": "DTLS/SCTP",
                     "fmt": 5000,
-                    "dtls": { "setup": "actpass" },
+                    "ice": { "ufrag": randomString(4), "password": randomString(22) },
+                    "dtls": { "setup": "actpass", "fingerprintHashFunction": "sha-256",
+                        "fingerprint": dtlsInfo.fingerprint.toUpperCase() },
                     "sctp": {
                         "port": 5000,
                         "app": "webrtc-datachannel",
@@ -529,13 +573,13 @@
 
         this.createAnswer = function () {
             // backwards compatibility with callback based method
-            var callbackArgsError = getArgumentsError("function, function, object", 2, arguments);
+            var callbackArgsError = getArgumentsError("function, function, dictionary", 2, arguments);
             if (!callbackArgsError) {
                 internalCreateAnswer(arguments[2]).then(arguments[0]).catch(arguments[1]);
                 return;
             }
 
-            var promiseArgsError = getArgumentsError("object", 0, arguments);
+            var promiseArgsError = getArgumentsError("dictionary", 0, arguments);
             if (!promiseArgsError)
                 return internalCreateAnswer(arguments[0]);
 
@@ -577,7 +621,9 @@
                 if (!lmdesc) {
                     lmdesc = {
                         "type": rmdesc.type,
-                        "dtls": { "setup": rmdesc.dtls.setup == "active" ? "passive" : "active" }
+                        "ice": { "ufrag": randomString(4), "password": randomString(22) },
+                        "dtls": { "setup": rmdesc.dtls.setup == "active" ? "passive" : "active",
+                            "fingerprintHashFunction": "sha-256", "fingerprint": dtlsInfo.fingerprint.toUpperCase() }
                     };
                     localSessionInfoSnapshot.mediaDescriptions.push(lmdesc);
                 }
@@ -589,7 +635,6 @@
                         "app": "webrtc-datachannel"
                     };
                     if (rmdesc.sctp) {
-                        lmdesc.sctp.maxMessageSize = rmdesc.sctp.maxMessageSize;
                         lmdesc.sctp.streams = rmdesc.sctp.streams;
                     }
                 } else {
@@ -599,6 +644,12 @@
                         lmdesc.rtcp = {};
 
                     lmdesc.rtcp.mux = !!(rmdesc.rtcp && rmdesc.rtcp.mux);
+
+                    do {
+                        lmdesc.ssrcs = [ randomNumber(32) ];
+                    } while (rmdesc.ssrcs && rmdesc.ssrcs.indexOf(lmdesc.ssrcs[0]) != -1);
+
+                    lmdesc.cname = cname;
                 }
 
                 if (lmdesc.dtls.setup == "actpass")
@@ -769,7 +820,7 @@
         };
 
         this.updateIce = function (configuration) {
-            checkArguments("updateIce", "object", 1, arguments);
+            checkArguments("updateIce", "dictionary", 1, arguments);
             checkConfigurationDictionary(configuration);
             checkClosedState("updateIce");
         };
@@ -974,7 +1025,7 @@
 
             if (configuration.iceServers) {
                 configuration.iceServers.forEach(function (iceServer) {
-                    checkType("RTCConfiguration.iceServers", iceServer, "object");
+                    checkType("RTCConfiguration.iceServers", iceServer, "dictionary");
                     checkDictionary("RTCIceServer", iceServer, {
                         "urls": "Array | string",
                         "url": "string", // legacy support
@@ -1067,7 +1118,7 @@
 
         function findInArrayById(array, id) {
             for (var i = 0; i < array.length; i++)
-                if (array[i].id == id);
+                if (array[i].id == id)
                     return array[i];
             return null;
         }
@@ -1153,10 +1204,11 @@
                 if (!mdesc.ice) {
                     mdesc.ice = {
                         "ufrag": ufrag,
-                        "password": password,
-                        "candidates": []
+                        "password": password
                     };
                 }
+                if (!mdesc.ice.candidates)
+                    mdesc.ice.candidates = [];
                 mdesc.ice.candidates.push(candidate);
 
                 if (candidate.address.indexOf(":") == -1) { // not IPv6
@@ -1208,7 +1260,8 @@
                         var sourceInfo = {
                             "mediaType": mdesc.type,
                             "label": "Remote " + mdesc.type + " source",
-                            "source": status.source
+                            "source": status.source,
+                            "type": "remote"
                         };
 
                         if (mdesc.mediaStreamId) {
@@ -1257,7 +1310,7 @@
     };
 
     function RTCSessionDescription(initDict) {
-        checkArguments("RTCSessionDescription", "object", 0, arguments);
+        checkArguments("RTCSessionDescription", "dictionary", 0, arguments);
         if (initDict) {
             checkDictionary("RTCSessionDescriptionInit", initDict, {
                 "type": "string",
@@ -1281,7 +1334,7 @@
     };
 
     function RTCIceCandidate(initDict) {
-        checkArguments("RTCIceCandidate", "object", 0, arguments);
+        checkArguments("RTCIceCandidate", "dictionary", 0, arguments);
         if (initDict) {
             checkDictionary("RTCIceCandidateInit", initDict, {
                 "candidate": "string",
@@ -1315,6 +1368,7 @@
     function RTCDataChannel(settings, whenPeerHandlerCanCreateDataChannels) {
         var _this = this;
         var internalDataChannel;
+        var sendQueue = [];
 
         EventTarget.call(this, {
             "onopen": null,
@@ -1336,6 +1390,18 @@
         };
         domObject.addReadOnlyAttributes(this, a);
 
+        var _binaryType = "blob";
+        Object.defineProperty(this, "binaryType", {
+            "get": function () { return _binaryType; },
+            "set": function (binaryType) {
+                if (binaryType !== "blob" && binaryType !== "arraybuffer") {
+                    throw createError("TypeMismatchError", "Unknown binary type: " +
+                        entityReplace(binaryType));
+                }
+                _binaryType = binaryType;
+            }
+        });
+
         var client = createInternalDataChannelClient();
         var clientRef = bridge.createObjectRef(client, "readyStateChanged", "gotData",
             "setBufferedAmount");
@@ -1347,13 +1413,52 @@
             });
         });
 
+        function getDataLength(data) {
+            if (data instanceof Blob)
+                return data.size;
+
+            if (data instanceof ArrayBuffer || ArrayBuffer.isView(data))
+                return (new Uint8Array(data)).byteLength;
+
+            return unescape(encodeURIComponent(data)).length;
+        }
+
+        function processSendQueue() {
+            if (a.readyState != "open")
+                return;
+
+            var data = sendQueue[0];
+            if (data instanceof Blob) {
+                var reader = new FileReader();
+                reader.onloadend = function () {
+                    sendQueue[0] = reader.result;
+                    processSendQueue();
+                };
+                reader.readAsArrayBuffer(data);
+                return;
+            }
+
+            if (data instanceof ArrayBuffer || ArrayBuffer.isView(data))
+                internalDataChannel.sendBinary(data);
+            else
+                internalDataChannel.send(data);
+
+            sendQueue.shift();
+
+            if (sendQueue.length)
+                processSendQueue();
+        }
+
         this.send = function (data) {
+            checkArguments("send", "string | ArrayBuffer | ArrayBufferView | Blob", 1, arguments);
+
             if (a.readyState == "connecting")
                 throw createError("InvalidStateError", "send: readyState is \"connecting\"");
 
-            a.bufferedAmount += data.length;
-            if (a.readyState == "open")
-                internalDataChannel.send(data);
+            a.bufferedAmount += getDataLength(data);
+
+            if (sendQueue.push(data) == 1)
+                processSendQueue();
         };
 
         this.close = function () {
@@ -1382,7 +1487,9 @@
             };
 
             client.setBufferedAmount = function (bufferedAmount) {
-                a.bufferedAmount = bufferedAmount;
+                a.bufferedAmount = bufferedAmount + sendQueue.reduce(function (prev, item) {
+                    return prev + getDataLength(item);
+                }, 0);
             };
 
             client.gotData = function (data) {
@@ -1401,7 +1508,7 @@
         if (!MediaStreamURL.nextId)
             MediaStreamURL.nextId = 1;
 
-        var url = "mediastream:" + randomString();
+        var url = "mediastream:" + randomString(36);
 
         function ensureImgDiv(video) {
             if (video.className.indexOf("owr-video") != -1)
@@ -1495,8 +1602,11 @@
             img.style.visibility = "hidden";
             img.src = "";
 
-            var tag = randomString();
-            bridge.renderSources(audioSources, videoSources, tag, function (renderInfo) {
+            var tag = randomString(36);
+            var useVideoOverlay = global.navigator.__owrVideoOverlaySupport
+                && video.className.indexOf("owr-overlay-video") != -1;
+
+            bridge.renderSources(audioSources, videoSources, tag, useVideoOverlay, function (renderInfo) {
                 var count = Math.round(Math.random() * 100000);
                 var roll = navigator.userAgent.indexOf("(iP") < 0 ? 100 : 1000000;
                 var retryTime;
@@ -1563,6 +1673,69 @@
                 }
             });
 
+            function checkIsHidden(elem) {
+                if (!elem.parentNode)
+                    return elem != document;
+
+                if (elem.style.display == "none" || elem.style.visibility == "hidden")
+                    return true;
+
+                return checkIsHidden(elem.parentNode);
+            }
+
+            function maybeUpdateVideoOverlay() {
+                var isHidden = checkIsHidden(imgDiv);
+                var hasChanged = isHidden != maybeUpdateVideoOverlay.oldIsHidden;
+                if (isHidden && !hasChanged)
+                    return;
+
+                var videoRect;
+                if (!isHidden) {
+                    var dpr = self.devicePixelRatio;
+                    if (window.innerWidth < window.innerHeight)
+                        dpr *= screen.width / window.innerWidth;
+                    else
+                        dpr *= screen.height / window.innerWidth;
+                    var bcr = imgDiv.getBoundingClientRect();
+                    var scl = document.body.scrollLeft;
+                    var sct = document.body.scrollTop;
+                    videoRect = [
+                        Math.floor((bcr.left + scl) * dpr),
+                        Math.floor((bcr.top + sct) * dpr),
+                        Math.ceil((bcr.right + scl) * dpr),
+                        Math.ceil((bcr.bottom + sct) * dpr)
+                    ];
+                    for (var i = 0; !hasChanged && i < videoRect.length; i++) {
+                        if (videoRect[i] != maybeUpdateVideoOverlay.oldVideoRect[i])
+                            hasChanged = true;
+                    }
+                } else
+                    videoRect = [0, 0, 0, 0];
+
+                if (hasChanged) {
+                    maybeUpdateVideoOverlay.oldIsHidden = isHidden;
+                    maybeUpdateVideoOverlay.oldVideoRect = videoRect;
+                    var trackId = mediaStream.getVideoTracks()[0].id;
+
+                    var rotation = 0;
+                    var transform = getComputedStyle(imgDiv).webkitTransform;
+                    if (!transform.indexOf("matrix(")) {
+                        var a = parseFloat(transform.substr(7).split(",")[0]);
+                        rotation = Math.acos(a) / Math.PI * 180;
+                    }
+
+                    alert("owr-message:video-rect," + (sourceInfoMap[trackId].type == "capture")
+                        + "," + tag
+                        + "," + videoRect[0] + "," + videoRect[1] + ","
+                        + videoRect[2] + "," + videoRect[3] + ","
+                        + rotation);
+                }
+            }
+            maybeUpdateVideoOverlay.oldVideoRect = [-1, -1, -1, -1];
+
+            if (useVideoOverlay && mediaStream.getVideoTracks().length > 0)
+                setInterval(maybeUpdateVideoOverlay, 500);
+
         }
 
         this.toString = function () {
@@ -1594,6 +1767,16 @@
        // this will always fail
        checkArguments("createObjectURL", "Blob", 1, arguments);
     };
+
+    Object.defineProperty(HTMLVideoElement.prototype, "srcObject", {
+        "get": function () {
+            return this._srcObject;
+        },
+        "set": function (stream) {
+            this._srcObject = stream;
+            this.src = url.createObjectURL(stream);
+        }
+    });
 
     var origDrawImage = CanvasRenderingContext2D.prototype.drawImage;
     CanvasRenderingContext2D.prototype.drawImage = function () {
